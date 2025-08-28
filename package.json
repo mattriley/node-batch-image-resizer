@@ -1,0 +1,55 @@
+{
+    "name": "@mattriley/batch-image-resizer",
+    "version": "1.0.0",
+    "description": "Recursively resize images and convert formats with adaptive concurrency and safe fallbacks. CLI and library (CJS + ESM).",
+    "license": "MIT",
+    "type": "module",
+    "main": "./index.cjs",
+    "module": "./index.mjs",
+    "exports": {
+        ".": {
+            "import": "./index.mjs",
+            "require": "./index.cjs",
+            "default": "./index.mjs"
+        },
+        "./cli": {
+            "import": "./bin/cli.cjs",
+            "require": "./bin/cli.cjs"
+        },
+        "./package.json": "./package.json"
+    },
+    "bin": {
+        "batch-image-resizer": "./bin/cli.cjs",
+        "resize": "./bin/cli.cjs"
+    },
+    "keywords": [
+        "images",
+        "jpeg",
+        "png",
+        "webp",
+        "avif",
+        "heic",
+        "heif",
+        "tiff",
+        "resize",
+        "convert",
+        "batch",
+        "recursive",
+        "cli",
+        "sharp"
+    ],
+    "dependencies": {
+        "sharp": "^0.33.4"
+    },
+    "engines": {
+        "node": ">=16.17"
+    },
+    "files": [
+        "index.cjs",
+        "index.mjs",
+        "index.d.ts",
+        "bin/cli.cjs",
+        "README.md",
+        "LICENSE"
+    ]
+}
