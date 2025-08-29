@@ -2,7 +2,7 @@
 
 /**
  * @mattriley/batch-image-resizer
- * v1.3.9
+ * v1.4.0
  * - FIX: removed stray/duplicated 'walk' blocks that caused SyntaxError
  * - DS_Store-only skip/prune
  * - Flatten default on; symlink-safe CLI (see bin/cli.cjs)
@@ -59,6 +59,9 @@ const DEFAULTS = {
   // macOS metadata
   skipDSStore: true,
   pruneDSStore: false,
+
+  // cleanup
+  pruneEmptyDirs: false,
 
   // compat
   includeExt: null,
@@ -126,14 +129,14 @@ async function uniquify(destDir, filename) {
 }
 
 // Walk directory recursively (skip only .DS_Store if configured)
-async function* walk(dir, baseOutDir, overwriting, skipDSStore) {
+async function* walk(dir, baseOutDir, overwriting, skipDSStore, flatten) {
   const entries = await fsp.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (skipDSStore && entry.isFile() && entry.name === '.DS_Store') continue;
     const inputPath = path.join(dir, entry.name);
     const outputPath = overwriting ? inputPath : path.join(baseOutDir, entry.name);
     if (entry.isDirectory()) {
-      if (!overwriting) await fsp.mkdir(outputPath, { recursive: true });
+      if (!overwriting && !flatten) await fsp.mkdir(outputPath, { recursive: true });
       yield* walk(inputPath, outputPath, overwriting, skipDSStore);
     } else {
       yield { inputPath, outputPath };
@@ -438,7 +441,7 @@ const resizeImages = async (options = {}) => {
 
   // Queue & drain
   const tasks = [];
-  for await (const { inputPath, outputPath } of walk(inputAbs, outputAbs || '', cfg.overwrite, cfg.skipDSStore)) {
+  for await (const { inputPath, outputPath } of walk(inputAbs, outputAbs || '', cfg.overwrite, cfg.skipDSStore, cfg.flatten)) {
     tasks.push(limiter.schedule(() => processFile(inputPath, outputPath)));
   }
 
@@ -449,9 +452,30 @@ const resizeImages = async (options = {}) => {
   dispose();
 
   // Optional cleanup of .DS_Store
+async function pruneEmptyDirs(dir) {
+  try {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await pruneEmptyDirs(p);
+        // if empty after recursion, remove
+        const still = await fsp.readdir(p);
+        if (still.length === 0) {
+          try { await fsp.rmdir(p); } catch {}
+        }
+      }
+    }
+  } catch {}
+}
+
   if (cfg.pruneDSStore) {
     try { await pruneDSStore(inputAbs); } catch {}
     if (outputAbs) { try { await pruneDSStore(outputAbs); } catch {} }
+  }
+
+  if (cfg.pruneEmptyDirs && outputAbs) {
+    try { await pruneEmptyDirs(outputAbs); } catch {}
   }
 
   return stats;

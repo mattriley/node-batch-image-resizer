@@ -1,6 +1,6 @@
 {
   "name": "@mattriley/batch-image-resizer",
-  "version": "1.3.9",
+  "version": "1.4.0",
   "description": "Recursively resize images and convert formats with adaptive concurrency and safe fallbacks. CLI and library (CJS + ESM).",
   "license": "MIT",
   "type": "module",

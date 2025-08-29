@@ -94,6 +94,7 @@ Flatten:
 macOS Finder metadata:
   --skip-dsstore           Skip '.DS_Store' files (default: true)
   --prune-dsstore          After processing, remove '.DS_Store' files (input & output)
+  --prune-empty-dirs       Remove empty directories from the OUTPUT tree after run
 
 Examples:
   batch-image-resizer ./photos ./out --auto --auto-threads
@@ -157,6 +158,7 @@ Examples:
     // DS_Store only
     ...(flags.has('skip-dsstore') ? { skipDSStore: getBool(flags, 'skip-dsstore') } : {}),
     pruneDSStore: getBool(flags, 'prune-dsstore'),
+    pruneEmptyDirs: getBool(flags, 'prune-empty-dirs'),
 
     logger: console,
     onWindow: ({ inFlightCap, avgLatency, lagMs }) => {
