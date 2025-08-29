@@ -1,12 +1,11 @@
 'use strict';
 
 /**
- * @mattriley/batch-image-resizer
- * v1.4.0
- * - FIX: removed stray/duplicated 'walk' blocks that caused SyntaxError
- * - DS_Store-only skip/prune
- * - Flatten default on; symlink-safe CLI (see bin/cli.cjs)
- * - Fallback output format; adaptive concurrency; thread pool tuning
+ * batch-image-resizer
+ * v1.4.5
+ * - Atomic writes to avoid 0-byte outputs
+ * - Robust HEIC handling (tolerant decode, colorspace normalize, flatten alpha for JPEG)
+ * - Flatten default on; DS_Store skip/prune; prune-empty-dirs
  */
 
 const fsp = require('fs/promises');
@@ -70,7 +69,12 @@ const DEFAULTS = {
   // hooks
   logger: null,
   onWindow: null,
-  onFile: null
+  onFile: null,
+
+  // platform fallbacks
+  heicFallback: (process.platform === 'darwin') ? 'auto' : 'none', // 'none' | 'sips' | 'auto'
+  jpegFallback: (process.platform === 'darwin') ? 'auto' : 'none', // 'none' | 'sips' | 'auto'
+  verboseErrors: false
 };
 
 // ---------------- Utils ----------------
@@ -137,7 +141,7 @@ async function* walk(dir, baseOutDir, overwriting, skipDSStore, flatten) {
     const outputPath = overwriting ? inputPath : path.join(baseOutDir, entry.name);
     if (entry.isDirectory()) {
       if (!overwriting && !flatten) await fsp.mkdir(outputPath, { recursive: true });
-      yield* walk(inputPath, outputPath, overwriting, skipDSStore);
+      yield* walk(inputPath, outputPath, overwriting, skipDSStore, flatten);
     } else {
       yield { inputPath, outputPath };
     }
@@ -154,6 +158,75 @@ async function pruneDSStore(dir) {
         await pruneDSStore(p);
       } else if (entry.name === '.DS_Store') {
         try { await fsp.rm(p, { force: true }); } catch {}
+      }
+    }
+  } catch {}
+}
+
+// Remove empty directories from a tree
+async function pruneEmptyDirs(dir) {
+  try {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await pruneEmptyDirs(p);
+        const still = await fsp.readdir(p);
+        if (still.length === 0) {
+          try { await fsp.rmdir(p); } catch {}
+        }
+      }
+    }
+  } catch {}
+}
+
+// External HEIC fallback on macOS via 'sips'
+async function sipsConvert(src, outFile, quality, maxDim /* optional */) {
+  // only on macOS where sips exists
+  try {
+    await fsp.access('/usr/bin/sips');
+  } catch {
+    throw new Error('sips not available');
+  }
+  const { spawn } = require('child_process');
+  await fsp.mkdir(path.dirname(outFile), { recursive: true });
+  const args = ['-s', 'format', 'jpeg'];
+  if (typeof quality === 'number') {
+    args.push('-s', 'formatOptions', String(quality));
+  }
+  if (maxDim && Number(maxDim) > 0) {
+    args.push('-Z', String(Number(maxDim)));
+  }
+  args.push(src, '--out', outFile);
+  if (typeof quality === 'number') {
+    // sips uses 0..100 for JPEG formatOptions
+    args.unshift('formatOptions', String(quality));
+    args.unshift('-s');
+  }
+  await new Promise((resolve, reject) => {
+    const p = spawn('/usr/bin/sips', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let errOut = ''; let out = '';
+    p.stdout.on('data', d => { out += String(d); });
+    p.stderr.on('data', d => { errOut += String(d); });
+    p.on('error', reject);
+    p.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(errOut.trim() || `sips exit ${code}`));
+    });
+  });
+}
+
+async function pruneEmptyDirs(dir) {
+  try {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await pruneEmptyDirs(p);
+        const still = await fsp.readdir(p);
+        if (still.length === 0) {
+          try { await fsp.rmdir(p); } catch {}
+        }
       }
     }
   } catch {}
@@ -263,14 +336,21 @@ const processFileFactory = (cfg, allowSet, stats, log, onFile, inputRoot, output
   };
 
   const attemptEncodeTo = async (src, outFile, encoderKey, quality, heifCompression) => {
-    let pipeline = sharp(src, { sequentialRead: true })
+    // Tolerant decode options help with some HEIC variants
+    let pipeline = sharp(src, { sequentialRead: true, limitInputPixels: false, failOn: 'none', pages: 1 })
+      .rotate()
       .resize({
         width: cfg.maxWidth,
         height: cfg.maxHeight,
         fit: 'inside',
         withoutEnlargement: true,
         fastShrinkOnLoad: true
-      });
+      })
+      .toColorspace('srgb');
+    if (encoderKey === 'jpeg') {
+      // Ensure no alpha channel for JPEG targets
+      pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
+    }
     pipeline = applyEncoder(pipeline, encoderKey, quality, { heifCompression });
     await pipeline.toFile(outFile);
   };
@@ -323,7 +403,15 @@ const processFileFactory = (cfg, allowSet, stats, log, onFile, inputRoot, output
     // Encode (with fallback)
     const doEncode = async (tgt) => {
       const { outFile } = await computeOut(inputPath, outputPath, base, tgt.outExt ?? extLower);
-      await attemptEncodeTo(inputPath, outFile, tgt.key || encoderForExt(extLower)?.key, cfg.quality, tgt.heifCompression);
+      const tmpFile = outFile + `.tmp-${process.pid}-${Math.random().toString(36).slice(2,8)}`;
+      try {
+        await attemptEncodeTo(inputPath, tmpFile, tgt.key || encoderForExt(extLower)?.key, cfg.quality, tgt.heifCompression);
+        await fsp.mkdir(path.dirname(outFile), { recursive: true });
+        await fsp.rename(tmpFile, outFile);
+      } catch (e) {
+        try { await fsp.rm(tmpFile, { force: true }); } catch {}
+        throw e;
+      }
       if (cfg.overwrite && outFile !== inputPath && path.extname(outFile).toLowerCase() !== extLower) {
         try { await fsp.unlink(inputPath); } catch {}
       }
@@ -341,16 +429,53 @@ const processFileFactory = (cfg, allowSet, stats, log, onFile, inputRoot, output
         log.warn && log.warn(`⚠ ${inputPath}: transient error (${err.code || err.message})`);
         throw err;
       }
+
+      // Optional HEIC/HEIF external fallback (macOS 'sips')
+      const trySipsHeic = (cfg.heicFallback === 'sips') || (cfg.heicFallback === 'auto' && process.platform === 'darwin');
+      const trySipsJpeg = (cfg.jpegFallback === 'sips') || (cfg.jpegFallback === 'auto' && process.platform === 'darwin');
+      const isHeicLike = (extLower === '.heic' || extLower === '.heif');
+      const isJpegLike = (extLower === '.jpg' || extLower === '.jpeg');
+      const wantJpeg = (fmt.mode === 'fixed' && fmt.key === 'jpeg') || (fmt.mode === 'same' && !ENCODE_SAME_OK.has(extLower) && (!fb || fb.key === 'jpeg')) || (fb && fb.key === 'jpeg');
+
+      if (trySipsHeic && isHeicLike && wantJpeg) {
+        try {
+          const { outFile } = await computeOut(inputPath, outputPath, base, '.jpg');
+          const tmpFile = outFile + `.sips-tmp-${process.pid}-${Math.random().toString(36).slice(2,8)}`;
+          await sipsConvert(inputPath, tmpFile, cfg.quality, Math.max(cfg.maxWidth, cfg.maxHeight));
+          await fsp.rename(tmpFile, outFile);
+          stats.converted++; onFile && onFile({ src: inputPath, dest: outFile, action: 'converted', via: 'sips' });
+          log.info && log.info(`✔ ${inputPath} → ${outFile} (jpeg via sips)`);
+          return;
+        } catch (sipsErr) {
+          log.warn && log.warn(`↪ ${inputPath}: sharp failed${cfg.verboseErrors ? ` (${err.message})` : ''}; sips failed${cfg.verboseErrors ? ` (${sipsErr.message})` : ''}`);
+        }
+      }
+
+      if (trySipsJpeg && isJpegLike && wantJpeg) {
+        try {
+          const { outFile } = await computeOut(inputPath, outputPath, base, '.jpg');
+          const tmpFile = outFile + `.sips-tmp-${process.pid}-${Math.random().toString(36).slice(2,8)}`;
+          await sipsConvert(inputPath, tmpFile, cfg.quality, Math.max(cfg.maxWidth, cfg.maxHeight));
+          await fsp.rename(tmpFile, outFile);
+          stats.converted++; onFile && onFile({ src: inputPath, dest: outFile, action: 'converted', via: 'sips' });
+          log.info && log.info(`✔ ${inputPath} → ${outFile} (jpeg via sips)`);
+          return;
+        } catch (sipsErr) {
+          log.warn && log.warn(`↪ ${inputPath}: sharp failed${cfg.verboseErrors ? ` (${err.message})` : ''}; sips (jpeg) failed${cfg.verboseErrors ? ` (${sipsErr.message})` : ''}`);
+        }
+      }
+
       if (fb && (fmt.mode !== 'fixed' || (fb.key !== fmt.key || fb.outExt !== fmt.outExt))) {
         try { await doEncode(fb); return; }
-        catch (fbErr) { log.warn && log.warn(`↪ ${inputPath}: primary failed (${err.message}); fallback ${fb.key} failed (${fbErr.message})`); }
+        catch (fbErr) { log.warn && log.warn(`↪ ${inputPath}: primary failed${cfg.verboseErrors ? ` (${err.message})` : ''}; fallback ${fb.key} failed${cfg.verboseErrors ? ` (${fbErr.message})` : ''}`); }
       }
       if (!cfg.overwrite) {
         const { outFile } = await computeOut(inputPath, outputPath, base, extLower);
+        try { const st = await fsp.stat(outFile); if (st.size === 0) { try { await fsp.rm(outFile, { force: true }); } catch {} } } catch {}
         try {
           await copyAsIs(inputPath, outFile);
           stats.copied++; onFile && onFile({ src: inputPath, dest: outFile, action: 'copied' });
-          log.info && log.info(`↪ ${inputPath} → ${outFile} (failed convert, copied)`);
+          log.info && log.info(`↪ ${inputPath} → ${outFile} (failed convert, copied${cfg.verboseErrors ? `; reason: ${err.message}` : ''})`);
         } catch (copyErr) {
           stats.errors++; onFile && onFile({ src: inputPath, dest: outFile, action: 'error', error: String(copyErr.message || copyErr) });
           log.error && log.error(`✖ ${inputPath}: failed to copy as-is to ${outFile}: ${copyErr.message}`);
@@ -358,7 +483,7 @@ const processFileFactory = (cfg, allowSet, stats, log, onFile, inputRoot, output
         }
       } else {
         stats.kept++; onFile && onFile({ src: inputPath, dest: inputPath, action: 'kept' });
-        log.info && log.info(`↪ ${inputPath}: failed convert, kept as-is`);
+        log.info && log.info(`↪ ${inputPath}: failed convert, kept as-is${cfg.verboseErrors ? `; reason: ${err.message}` : ''}`);
       }
     }
   };
@@ -451,29 +576,11 @@ const resizeImages = async (options = {}) => {
   }
   dispose();
 
-  // Optional cleanup of .DS_Store
-async function pruneEmptyDirs(dir) {
-  try {
-    const entries = await fsp.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const p = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await pruneEmptyDirs(p);
-        // if empty after recursion, remove
-        const still = await fsp.readdir(p);
-        if (still.length === 0) {
-          try { await fsp.rmdir(p); } catch {}
-        }
-      }
-    }
-  } catch {}
-}
-
+  // Optional cleanup
   if (cfg.pruneDSStore) {
     try { await pruneDSStore(inputAbs); } catch {}
     if (outputAbs) { try { await pruneDSStore(outputAbs); } catch {} }
   }
-
   if (cfg.pruneEmptyDirs && outputAbs) {
     try { await pruneEmptyDirs(outputAbs); } catch {}
   }

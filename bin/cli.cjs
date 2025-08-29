@@ -43,7 +43,7 @@ const getList = (m, k) => m.has(k) ? String(m.get(k)).split(',').map(s => s.trim
 
   // --version
   if (getBool(flags, 'version') || getBool(flags, 'v')) {
-    console.log(`@mattriley/batch-image-resizer v${pkg.version}`);
+    console.log(`batch-image-resizer v${pkg.version}`);
     process.exit(0);
   }
 
@@ -92,9 +92,14 @@ Flatten:
   --max-filename-bytes <n>  Max UTF-8 bytes for a single filename (default: 200)
 
 macOS Finder metadata:
-  --skip-dsstore           Skip '.DS_Store' files (default: true)
-  --prune-dsstore          After processing, remove '.DS_Store' files (input & output)
-  --prune-empty-dirs       Remove empty directories from the OUTPUT tree after run
+  --skip-dsstore            Skip '.DS_Store' files (default: true)
+  --prune-dsstore           After processing, remove '.DS_Store' files (input & output)
+  --prune-empty-dirs        Remove empty directories from the OUTPUT tree after run
+
+iPhone HEIC fallback:
+  --heic-fallback <none|sips|auto>  macOS: 'auto' tries 'sips' when HEIC→JPEG via sharp fails (default auto on macOS; none elsewhere)
+  --jpeg-fallback <none|sips|auto>  macOS: also try 'sips' for JPEG inputs when converting to JPEG (default auto on macOS)
+  --verbose-errors                   Include underlying error messages in logs
 
 Examples:
   batch-image-resizer ./photos ./out --auto --auto-threads
@@ -160,6 +165,10 @@ Examples:
     pruneDSStore: getBool(flags, 'prune-dsstore'),
     pruneEmptyDirs: getBool(flags, 'prune-empty-dirs'),
 
+    heicFallback: (flags.has('heic-fallback') ? String(flags.get('heic-fallback')) : ((process.platform === 'darwin') ? 'auto' : 'none')),
+    jpegFallback: (flags.has('jpeg-fallback') ? String(flags.get('jpeg-fallback')) : ((process.platform === 'darwin') ? 'auto' : 'none')),
+    verboseErrors: getBool(flags, 'verbose-errors'),
+
     logger: console,
     onWindow: ({ inFlightCap, avgLatency, lagMs }) => {
       if (getBool(flags, 'auto')) {
@@ -168,7 +177,7 @@ Examples:
     }
   };
 
-  console.log(`@mattriley/batch-image-resizer v${pkg.version}`);
+  console.log(`batch-image-resizer v${pkg.version}`);
   console.log(`→ Input: ${options.inputDir}`);
   console.log(`→ Mode: ${options.overwrite ? 'OVERWRITE IN PLACE' : `Output → ${options.outputDir}`}`);
   console.log(`→ Bounds: ${options.maxWidth}×${options.maxHeight}, format=${options.format}${options.fallbackFormat ? ` (fallback=${options.fallbackFormat})` : ''}, quality=${options.quality}`);

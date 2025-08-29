@@ -1,54 +1,21 @@
 {
-  "name": "@mattriley/batch-image-resizer",
-  "version": "1.4.0",
-  "description": "Recursively resize images and convert formats with adaptive concurrency and safe fallbacks. CLI and library (CJS + ESM).",
-  "license": "MIT",
-  "type": "module",
-  "main": "./index.cjs",
-  "module": "./index.mjs",
-  "exports": {
-    ".": {
-      "import": "./index.mjs",
-      "require": "./index.cjs",
-      "default": "./index.mjs"
-    },
-    "./cli": {
-      "import": "./bin/cli.cjs",
-      "require": "./bin/cli.cjs"
-    },
-    "./package.json": "./package.json"
-  },
+  "name": "batch-image-resizer",
+  "version": "1.4.5",
+  "description": "Fast parallel batch image resizer/converter (Sharp) with flatten, fallbacks, and safe overwrites.",
   "bin": {
-    "batch-image-resizer": "./bin/cli.cjs"
+    "batch-image-resizer": "bin/cli.cjs"
   },
-  "keywords": [
-    "images",
-    "jpeg",
-    "png",
-    "webp",
-    "avif",
-    "heic",
-    "heif",
-    "tiff",
-    "resize",
-    "convert",
-    "batch",
-    "recursive",
-    "cli",
-    "sharp"
-  ],
+  "type": "commonjs",
+  "license": "MIT",
+  "author": "mattriley",
+  "repository": {
+    "type": "git",
+    "url": "https://example.com/mattriley/batch-image-resizer.git"
+  },
   "dependencies": {
-    "sharp": "^0.33.4"
+    "sharp": "^0.33.3"
   },
   "engines": {
-    "node": ">=16.17"
-  },
-  "files": [
-    "index.cjs",
-    "index.mjs",
-    "index.d.ts",
-    "bin/cli.cjs",
-    "README.md",
-    "LICENSE"
-  ]
+    "node": ">=18"
+  }
 }
