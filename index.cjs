@@ -2,10 +2,11 @@
 
 /**
  * batch-image-resizer
- * v1.4.5
+ * v1.4.6
+ * - Defaults: format=jpeg, pruneDSStore/pruneEmptyDirs/verboseErrors enabled
  * - Atomic writes to avoid 0-byte outputs
- * - Robust HEIC handling (tolerant decode, colorspace normalize, flatten alpha for JPEG)
- * - Flatten default on; DS_Store skip/prune; prune-empty-dirs
+ * - Robust HEIC handling + macOS 'sips' fallback; JPEG fallback too
+ * - Flatten default on; safe filename collisions
  */
 
 const fsp = require('fs/promises');
@@ -13,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 const sharp = require('sharp');
 
 // ---------------- Defaults ----------------
@@ -27,7 +29,7 @@ const DEFAULTS = {
   overwrite: false,
 
   // format & quality
-  format: 'same',
+  format: 'jpeg',       // DEFAULT CHANGED
   fallbackFormat: null,
   quality: 85,
   maxWidth: 1920,
@@ -55,12 +57,17 @@ const DEFAULTS = {
   flattenSep: '_',
   maxFilenameBytes: 200,
 
-  // macOS metadata
+  // macOS Finder metadata
   skipDSStore: true,
-  pruneDSStore: false,
+  pruneDSStore: true,     // DEFAULT CHANGED
 
   // cleanup
-  pruneEmptyDirs: false,
+  pruneEmptyDirs: true,   // DEFAULT CHANGED
+
+  // platform fallbacks
+  heicFallback: (process.platform === 'darwin') ? 'auto' : 'none', // 'none' | 'sips' | 'auto'
+  jpegFallback: (process.platform === 'darwin') ? 'auto' : 'none', // 'none' | 'sips' | 'auto'
+  verboseErrors: true,    // DEFAULT CHANGED
 
   // compat
   includeExt: null,
@@ -69,12 +76,7 @@ const DEFAULTS = {
   // hooks
   logger: null,
   onWindow: null,
-  onFile: null,
-
-  // platform fallbacks
-  heicFallback: (process.platform === 'darwin') ? 'auto' : 'none', // 'none' | 'sips' | 'auto'
-  jpegFallback: (process.platform === 'darwin') ? 'auto' : 'none', // 'none' | 'sips' | 'auto'
-  verboseErrors: false
+  onFile: null
 };
 
 // ---------------- Utils ----------------
@@ -180,33 +182,17 @@ async function pruneEmptyDirs(dir) {
   } catch {}
 }
 
-// External HEIC fallback on macOS via 'sips'
+// macOS 'sips' helper; can also resize using -Z
 async function sipsConvert(src, outFile, quality, maxDim /* optional */) {
-  // only on macOS where sips exists
-  try {
-    await fsp.access('/usr/bin/sips');
-  } catch {
-    throw new Error('sips not available');
-  }
-  const { spawn } = require('child_process');
+  try { await fsp.access('/usr/bin/sips'); } catch { throw new Error('sips not available'); }
   await fsp.mkdir(path.dirname(outFile), { recursive: true });
   const args = ['-s', 'format', 'jpeg'];
-  if (typeof quality === 'number') {
-    args.push('-s', 'formatOptions', String(quality));
-  }
-  if (maxDim && Number(maxDim) > 0) {
-    args.push('-Z', String(Number(maxDim)));
-  }
+  if (typeof quality === 'number') args.push('-s', 'formatOptions', String(quality));
+  if (maxDim && Number(maxDim) > 0) args.push('-Z', String(Number(maxDim)));
   args.push(src, '--out', outFile);
-  if (typeof quality === 'number') {
-    // sips uses 0..100 for JPEG formatOptions
-    args.unshift('formatOptions', String(quality));
-    args.unshift('-s');
-  }
   await new Promise((resolve, reject) => {
     const p = spawn('/usr/bin/sips', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let errOut = ''; let out = '';
-    p.stdout.on('data', d => { out += String(d); });
+    let errOut = '';
     p.stderr.on('data', d => { errOut += String(d); });
     p.on('error', reject);
     p.on('close', (code) => {
@@ -214,22 +200,6 @@ async function sipsConvert(src, outFile, quality, maxDim /* optional */) {
       else reject(new Error(errOut.trim() || `sips exit ${code}`));
     });
   });
-}
-
-async function pruneEmptyDirs(dir) {
-  try {
-    const entries = await fsp.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const p = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await pruneEmptyDirs(p);
-        const still = await fsp.readdir(p);
-        if (still.length === 0) {
-          try { await fsp.rmdir(p); } catch {}
-        }
-      }
-    }
-  } catch {}
 }
 
 // Adaptive limiter (AIMD)
@@ -336,7 +306,7 @@ const processFileFactory = (cfg, allowSet, stats, log, onFile, inputRoot, output
   };
 
   const attemptEncodeTo = async (src, outFile, encoderKey, quality, heifCompression) => {
-    // Tolerant decode options help with some HEIC variants
+    // Tolerant decode; EXIF-aware rotate before resize; normalize to sRGB
     let pipeline = sharp(src, { sequentialRead: true, limitInputPixels: false, failOn: 'none', pages: 1 })
       .rotate()
       .resize({
@@ -348,7 +318,6 @@ const processFileFactory = (cfg, allowSet, stats, log, onFile, inputRoot, output
       })
       .toColorspace('srgb');
     if (encoderKey === 'jpeg') {
-      // Ensure no alpha channel for JPEG targets
       pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
     }
     pipeline = applyEncoder(pipeline, encoderKey, quality, { heifCompression });
@@ -430,14 +399,16 @@ const processFileFactory = (cfg, allowSet, stats, log, onFile, inputRoot, output
         throw err;
       }
 
-      // Optional HEIC/HEIF external fallback (macOS 'sips')
+      // Optional macOS 'sips' fallback
       const trySipsHeic = (cfg.heicFallback === 'sips') || (cfg.heicFallback === 'auto' && process.platform === 'darwin');
       const trySipsJpeg = (cfg.jpegFallback === 'sips') || (cfg.jpegFallback === 'auto' && process.platform === 'darwin');
       const isHeicLike = (extLower === '.heic' || extLower === '.heif');
       const isJpegLike = (extLower === '.jpg' || extLower === '.jpeg');
-      const wantJpeg = (fmt.mode === 'fixed' && fmt.key === 'jpeg') || (fmt.mode === 'same' && !ENCODE_SAME_OK.has(extLower) && (!fb || fb.key === 'jpeg')) || (fb && fb.key === 'jpeg');
+      const wantJpeg = (fmt.mode === 'fixed' && fmt.key === 'jpeg') ||
+                       (fmt.mode === 'same' && !ENCODE_SAME_OK.has(extLower) && (!fb || fb.key === 'jpeg')) ||
+                       (fb && fb.key === 'jpeg');
 
-      if (trySipsHeic && isHeicLike && wantJpeg) {
+      if (wantJpeg && ((trySipsHeic && isHeicLike) || (trySipsJpeg && isJpegLike))) {
         try {
           const { outFile } = await computeOut(inputPath, outputPath, base, '.jpg');
           const tmpFile = outFile + `.sips-tmp-${process.pid}-${Math.random().toString(36).slice(2,8)}`;
@@ -448,20 +419,6 @@ const processFileFactory = (cfg, allowSet, stats, log, onFile, inputRoot, output
           return;
         } catch (sipsErr) {
           log.warn && log.warn(`↪ ${inputPath}: sharp failed${cfg.verboseErrors ? ` (${err.message})` : ''}; sips failed${cfg.verboseErrors ? ` (${sipsErr.message})` : ''}`);
-        }
-      }
-
-      if (trySipsJpeg && isJpegLike && wantJpeg) {
-        try {
-          const { outFile } = await computeOut(inputPath, outputPath, base, '.jpg');
-          const tmpFile = outFile + `.sips-tmp-${process.pid}-${Math.random().toString(36).slice(2,8)}`;
-          await sipsConvert(inputPath, tmpFile, cfg.quality, Math.max(cfg.maxWidth, cfg.maxHeight));
-          await fsp.rename(tmpFile, outFile);
-          stats.converted++; onFile && onFile({ src: inputPath, dest: outFile, action: 'converted', via: 'sips' });
-          log.info && log.info(`✔ ${inputPath} → ${outFile} (jpeg via sips)`);
-          return;
-        } catch (sipsErr) {
-          log.warn && log.warn(`↪ ${inputPath}: sharp failed${cfg.verboseErrors ? ` (${err.message})` : ''}; sips (jpeg) failed${cfg.verboseErrors ? ` (${sipsErr.message})` : ''}`);
         }
       }
 

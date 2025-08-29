@@ -1,7 +1,7 @@
 {
   "name": "batch-image-resizer",
-  "version": "1.4.5",
-  "description": "Fast parallel batch image resizer/converter (Sharp) with flatten, fallbacks, and safe overwrites.",
+  "version": "1.4.6",
+  "description": "Fast parallel batch image resizer/converter (Sharp) with flatten, HEIC/JPEG fallbacks, and safe atomic writes.",
   "bin": {
     "batch-image-resizer": "bin/cli.cjs"
   },
