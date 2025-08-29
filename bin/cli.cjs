@@ -4,7 +4,11 @@
 
 const path = require('path');
 const os = require('os');
-const { resizeImages, DEFAULT_ALLOW_EXT } = require('../index.cjs');
+const fs = require('fs');
+const realCliPath = fs.realpathSync(__filename);
+const ROOT = path.resolve(path.dirname(realCliPath), '..');
+const pkg = require(path.join(ROOT, 'package.json'));
+const { resizeImages, DEFAULT_ALLOW_EXT } = require(path.join(ROOT, 'index.cjs'));
 
 // simple flag parsing (supports --key value and --key=value)
 const parseArgs = (argv) => {
@@ -37,9 +41,15 @@ const getList = (m, k) => m.has(k) ? String(m.get(k)).split(',').map(s => s.trim
 (async () => {
   const { positionals, flags } = parseArgs(process.argv);
 
+  // --version
+  if (getBool(flags, 'version') || getBool(flags, 'v')) {
+    console.log(`@mattriley/batch-image-resizer v${pkg.version}`);
+    process.exit(0);
+  }
+
   // Help
   if (getBool(flags, 'help') || getBool(flags, 'h')) {
-    console.log(`batch-image-resizer
+    console.log(`batch-image-resizer (v${pkg.version})
 Usage: batch-image-resizer [INPUT_DIR] [OUTPUT_DIR] [flags...]
 
 Positionals:
@@ -52,6 +62,7 @@ Core:
   --max-width <px>          Resize bound width (default: 1920)
   --max-height <px>         Resize bound height (default: 1080)
   --format <fmt>            Output format: same|jpeg|jpg|png|webp|avif|heif|heic|tiff (default: same)
+  --fallback-format <fmt>   If primary encode fails/unsupported, try this format (e.g., jpeg)
 
 Compatibility:
   --include-ext a,b,c       Override allow-list (dot optional)
@@ -73,11 +84,21 @@ Sharp thread pool:
   --min-sharp-threads <n>   Lower bound when auto-sizing (default: 1)
   --max-sharp-threads <n>   Upper bound when auto-sizing (default: ≈ cores)
 
+Flatten:
+  --flatten                 Write outputs into a single flat directory (no subfolders) [default: true]
+                            Pass '--flatten false' to keep original subfolders
+  --flatten-strategy <s>    'hash' (default) or 'path'
+  --flatten-sep <s>         Separator for 'path' strategy (default: _)
+  --max-filename-bytes <n>  Max UTF-8 bytes for a single filename (default: 200)
+
+macOS Finder metadata:
+  --skip-dsstore           Skip '.DS_Store' files (default: true)
+  --prune-dsstore          After processing, remove '.DS_Store' files (input & output)
+
 Examples:
   batch-image-resizer ./photos ./out --auto --auto-threads
+  batch-image-resizer ./photos ./out --format heic --fallback-format jpeg
   batch-image-resizer ./photos ./out --format jpeg --quality 80
-  batch-image-resizer ./photos ./out --include-ext png,jpg,jpeg,heic
-  batch-image-resizer ./photos ./out --exclude-ext gif,bmp
 `);
     process.exit(0);
   }
@@ -87,6 +108,15 @@ Examples:
   const inputDir = path.resolve(positionals[0] || './images');
   const outputDir = overwrite ? undefined : path.resolve(positionals[1] || './output');
 
+  // flatten handling: undefined means "use default (true)"
+  const flattenFlag = flags.has('flatten') ? getBool(flags, 'flatten') : undefined;
+  const effectiveFlatten = (flattenFlag === undefined) ? true : !!flattenFlag;
+
+  if (overwrite && effectiveFlatten) {
+    console.error('Error: --flatten cannot be used with --overwrite. Choose one.');
+    process.exit(1);
+  }
+
   const options = {
     inputDir,
     outputDir,
@@ -94,6 +124,7 @@ Examples:
 
     // format & quality
     format: getStr(flags, 'format', 'same'),
+    fallbackFormat: getStr(flags, 'fallback-format', null),
     quality: getInt(flags, 'quality', 85, 1),
     maxWidth: getInt(flags, 'max-width', 1920, 1),
     maxHeight: getInt(flags, 'max-height', 1080, 1),
@@ -117,6 +148,16 @@ Examples:
     includeExt: getList(flags, 'include-ext'),
     excludeExt: getList(flags, 'exclude-ext'),
 
+    // flatten (omit property when user didn't pass it, so library default applies)
+    ...(flattenFlag !== undefined ? { flatten: flattenFlag } : {}),
+    flattenStrategy: getStr(flags, 'flatten-strategy', 'hash'),
+    flattenSep: getStr(flags, 'flatten-sep', '_'),
+    maxFilenameBytes: getInt(flags, 'max-filename-bytes', 200, 50),
+
+    // DS_Store only
+    ...(flags.has('skip-dsstore') ? { skipDSStore: getBool(flags, 'skip-dsstore') } : {}),
+    pruneDSStore: getBool(flags, 'prune-dsstore'),
+
     logger: console,
     onWindow: ({ inFlightCap, avgLatency, lagMs }) => {
       if (getBool(flags, 'auto')) {
@@ -125,9 +166,12 @@ Examples:
     }
   };
 
+  console.log(`@mattriley/batch-image-resizer v${pkg.version}`);
   console.log(`→ Input: ${options.inputDir}`);
   console.log(`→ Mode: ${options.overwrite ? 'OVERWRITE IN PLACE' : `Output → ${options.outputDir}`}`);
-  console.log(`→ Bounds: ${options.maxWidth}×${options.maxHeight}, format=${options.format}, quality=${options.quality}`);
+  console.log(`→ Bounds: ${options.maxWidth}×${options.maxHeight}, format=${options.format}${options.fallbackFormat ? ` (fallback=${options.fallbackFormat})` : ''}, quality=${options.quality}`);
+  console.log(`→ Flatten: ${effectiveFlatten ? 'ENABLED (flat output)' : 'DISABLED (preserve dirs)'}`);
+  console.log(`→ DS_Store: ${flags.has('skip-dsstore') ? (getBool(flags, 'skip-dsstore') ? 'SKIP' : 'INCLUDE') : 'SKIP (default)'}${getBool(flags, 'prune-dsstore') ? ', PRUNE after run' : ''}`);
   if (!options.includeExt && !options.excludeExt) {
     console.log(`→ Convertible extensions: ${DEFAULT_ALLOW_EXT.join(' ')}`);
   }

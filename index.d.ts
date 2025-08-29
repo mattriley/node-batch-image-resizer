@@ -23,6 +23,11 @@ export interface Options {
   overwrite?: boolean;
 
   format?: OutputFormat;
+  fallbackFormat?: Exclude<OutputFormat, 'same'> | null;
+  flatten?: boolean;
+  flattenStrategy?: 'hash' | 'path';
+  flattenSep?: string;
+  maxFilenameBytes?: number;
   quality?: number;
   maxWidth?: number;
   maxHeight?: number;
